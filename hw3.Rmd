@@ -1,0 +1,184 @@
+---
+title: "hw3"
+author: 'Shawn Ye'
+data: '10/13/2020'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(httr)
+library(xml2)
+library(stringr)
+```
+
+## APIS
+#### 1
+```{r}
+# Downloading the website
+website <- xml2::read_html("https://pubmed.ncbi.nlm.nih.gov/?term=sars-cov-2+trial+vaccine")
+# Finding the counts
+counts <- xml2::xml_find_first(website, "/html/body/main/div[9]/div[2]/div[2]/div[1]/span")
+# Turning it into text
+counts <- as.character(counts)
+# Extracting the data using regex
+stringr::str_extract(counts, "[0-9,]+")
+```
+There were 560 papers found under the term "sars-cov-2 trial vaccine".
+
+#### 2 
+```{r paper-sctv, results='hide'}
+library(httr)
+query_ids <- GET(
+  url   = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+  query = list(
+    db= "pubmed",
+    term="sars-cov-2 trial vaccine",
+    retmax= 250))
+# Extracting the content of the response of GET
+ids <- httr::content(query_ids)
+```
+
+```{r get-ids, results='hide'}
+# Turn the result into a character vector
+ids <- as.character(ids)
+# Find all the ids [[1]] can change list to character
+ids <- stringr::str_extract_all(ids, "<Id>[0-9]+</Id>")[[1]]
+# Remove all the leading and trailing <Id> </Id>. Make use of "|"
+ids <- stringr::str_remove_all(ids, "<Id>")
+ids <- stringr::str_remove_all(ids, "</Id>")
+```
+
+```{r get-abstracts, results='hide'}
+publications <- GET(
+  url   = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+  query = list(
+    db = "pubmed",
+    id = paste(ids, collapse = ","),
+    retmax = 250,
+    rettype = "abstract"
+    )
+)
+# Turning the output into character vector
+publications <- httr::content(publications)
+publications_txt <- as.character(publications)
+
+```
+
+```{r one-string-per-response, results='hide'}
+pub_char_list <- xml2::xml_children(publications)
+pub_char_list <- sapply(pub_char_list, as.character)
+```
+
+```{r extracting-last-bit, results='hide'}
+abstracts <- str_extract(pub_char_list, "<Abstract>(\\n|.)+</Abstract>")
+abstracts <- str_remove_all(abstracts, "</?[[:alnum:]]+>")
+abstracts <- str_replace_all(abstracts, "\\s+"," ")
+table(is.na(abstracts))
+```
+```{r dates, results='hide'}
+dates <- str_extract(pub_char_list, "<PubDate>(\\n|.)+</PubDate>")
+dates <- str_remove_all(dates, "</?[[:alpha:]]+>")
+dates <- str_remove_all(dates, "\n")
+dates <- str_remove_all(dates, "</?[[:punct:]]+>")
+table(is.na(dates))
+```
+```{r process-titles,results='hide'}
+titles <- str_extract(pub_char_list, "<ArticleTitle>(\\n|.)+</ArticleTitle>")
+titles <- str_remove_all(titles, "</?[[:alnum:]]+>")
+titles <- str_replace_all(titles, "\\s+"," ")
+table(is.na(titles))
+```
+```{r process-pubdates,results='hide'}
+dates <- str_extract(pub_char_list, "<PubDate>(\\n|.)+</PubDate>")
+dates <- str_remove_all(dates, "</?[[:alpha:]]+>")
+dates <- str_remove_all(dates, "\n")
+dates <- str_remove_all(dates, "</?[[:punct:]]+>")
+table(is.na(dates))
+```
+```{r process-journals, results='hide'}
+journals <- str_extract(pub_char_list, "<MedlineTA>(\\n|.)+</MedlineTA>")
+table(is.na(journals))
+```
+```{r build-db}
+database <- data.frame(
+  PubMedID = ids,
+  Title = titles,
+  Abstracts=abstracts,
+  PublicationDate=dates,
+  JournalName=journals
+)
+knitr::kable(database)
+```
+
+## Text Mining
+#### 1
+```{r}
+library(readr)
+library(tidyverse)
+library(tidytext)
+library(ggplot2)
+library(forcats)
+tm <- read_csv("https://raw.githubusercontent.com/USCbiostats/data-science-data/master/03_pubmed/pubmed.csv")
+tm %>%
+  unnest_tokens(output=token, input=abstract) %>%
+  count(token, sort = TRUE) %>%
+  top_n(n=20, wt= n) %>%
+  ggplot(aes(x=n, y=fct_reorder(token,n))) +
+  geom_col()
+```
+
+```{r}
+tm %>%
+  unnest_tokens(output=token, input=abstract) %>%
+  anti_join(stop_words, by = c("token"="word")) %>%
+  count(token, sort = TRUE) %>%
+  top_n(n=20, wt= n) %>%
+  ggplot(aes(x=n, y=reorder(token,n))) +
+  geom_col()
+```
+```{r}
+bigram <- tm %>%
+  unnest_tokens(token, abstract) %>%
+  filter(!(token %in% stop_words$word)) %>%
+  group_by(term) %>%
+  count(token, sort = TRUE) %>%
+  top_n(5, n) %>%
+  arrange(term, desc(n))
+knitr::kable(bigram, caption = "The 5 most common tokens for each search term")
+```
+
+Most of the frequent words are stop words. After remove the stop words, covid, 19 and patients are the top three frequent words. After removing the stop words, the 5 most common words for 'covid' are '19', 'covid', 'disease', 'pandemic' and 'patients'; for 'cyctic fibrosis' are 'cf', 'cystic', 'disease', 'fibrosis' and 'patients'; for 'meningitis' are 'clinical', 'csf', 'meningeal', 'meningitis' and 'patients'; for 'preeclampsia' are 'eclampsia', 'pre', 'preeclampsia', 'pregnancy' and 'women'; for 'prostate cancer' are 'cancer', 'disease', 'patients', 'prostate' and 'treatment'.
+
+#### 2
+```{r}
+tm2 <- tm %>%
+  unnest_ngrams(token, abstract, n = 2) %>%
+  separate(token, into = c("word1", "word2"), sep = " ") %>%
+  anti_join(tidytext::stop_words, by = c("word1" = "word")) %>%
+  anti_join(tidytext::stop_words, by = c("word2" = "word")) %>%
+  unite(bigram, word1, word2, sep = " ")
+tm2 %>%
+  count(bigram, sort = TRUE) %>%
+  top_n(10, n) %>%
+  ggplot(aes(x = n, y = fct_reorder(bigram, n)))+
+  geom_col()+
+  ggtitle(" The 10 most common bigrams without stop words")
+```
+
+The 10 most common bigram is 'covid 19', 'prostate cancer', 'pre eclampsia', 'cystic fibrosis', '19 patients', '19 pandemic', 'coronavirus disease', '95 ci', 'sars cov' and 'cov 2'.
+
+#### 3
+```{r}
+tf_idf <- tm %>%
+  unnest_tokens(token, abstract) %>%
+  filter(!(token %in% stop_words$word)) %>%
+  group_by(term) %>%
+  count(token, sort = TRUE) %>%
+  bind_tf_idf(token, term, n) %>%
+  arrange(desc(tf_idf)) %>%
+  top_n(5, n)%>%
+  arrange(term, desc(tf_idf)) 
+knitr::kable(list(tf_idf, bigram))
+```
+
+Unlike the answers in question 1, '19', 'patients' and 'disease' do not have TD-IDF value with 'covid'. Similarly, 'patients' and 'disease' do not have TD-IDF value with 'cystic fibrosis'; 'patients' and 'clinical' do not have TD-IDF with 'meningitis'; and 'pre' and 'women' do not have TD-IDF value with 'preeclampsia'. For search term 'prostate cancer', only 'prostate' has TD-IDF value.
